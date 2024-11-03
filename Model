@@ -4,3 +4,240 @@ dependencies {
     implementation "androidx.lifecycle:lifecycle-viewmodel-ktx:2.4.1"
     implementation "androidx.lifecycle:lifecycle-livedata-ktx:2.4.1"
 }
+
+### Plugin .
+apply plugin: 'kotlin-kapt' 
+
+### ROOM PRODUTO
+
+@Entity(tableName = "product")
+data class Product(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val productName: String,
+    val purchasePrice: Double,
+    val stockQuantity: Int,
+    val color: String,
+    val size: String,
+    val onlineSalePrice: Double = 0.0,
+    val physicalSalePrice: Double = 0.0
+)
+
+### DAO
+
+interface ProductDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(product: Product)
+
+    @Update
+    suspend fun update(product: Product)
+
+    @Query("UPDATE product SET stockQuantity = :newQuantity WHERE id = :productId")
+    suspend fun updateStockQuantity(productId: Int, newQuantity: Int)
+
+    @Query("SELECT * FROM product ORDER BY productName ASC")
+    fun getAllProducts(): LiveData<List<Product>>
+}
+
+
+### APPDATA
+
+@Database(entities = [Product::class], version = 1)
+abstract class AppDatabase : RoomDatabase() {
+    abstract fun productDao(): ProductDao
+
+    companion object {
+        @Volatile
+        private var INSTANCE: AppDatabase? = null
+
+        fun getDatabase(context: Context): AppDatabase {
+            return INSTANCE ?: synchronized(this) {
+                val instance = Room.databaseBuilder(
+                    context.applicationContext,
+                    AppDatabase::class.java,
+                    "product_database"
+                ).build()
+                INSTANCE = instance
+                instance
+            }
+        }
+    }
+}
+Etapa 4: Configuração do ViewModel e Repositório
+Repositório
+kotlin
+Copiar código
+class ProductRepository(private val productDao: ProductDao) {
+
+    val allProducts: LiveData<List<Product>> = productDao.getAllProducts()
+
+    suspend fun insert(product: Product) {
+        productDao.insert(product)
+    }
+
+    suspend fun update(product: Product) {
+        productDao.update(product)
+    }
+
+    suspend fun updateStockQuantity(productId: Int, newQuantity: Int) {
+        productDao.updateStockQuantity(productId, newQuantity)
+    }
+}
+
+### MODEL VIEW 
+
+class ProductViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val repository: ProductRepository
+
+    val allProducts: LiveData<List<Product>>
+
+    init {
+        val productDao = AppDatabase.getDatabase(application).productDao()
+        repository = ProductRepository(productDao)
+        allProducts = repository.allProducts
+    }
+
+    fun calculateSalePrices(purchasePrice: Double): Pair<Double, Double> {
+        val onlineSalePrice = purchasePrice * 1.36 + 3.00
+        val physicalSalePrice = purchasePrice * 1.28 + 10.00
+        return Pair(onlineSalePrice, physicalSalePrice)
+    }
+
+    fun insertProduct(product: Product) = viewModelScope.launch {
+        repository.insert(product)
+    }
+
+    fun updateStockQuantity(productId: Int, newQuantity: Int) = viewModelScope.launch {
+        repository.updateStockQuantity(productId, newQuantity)
+    }
+}
+
+###  LAYOUT APLICAÇAO
+
+<LinearLayout ... >
+    <EditText
+        android:id="@+id/editProductName"
+        android:hint="Nome do Produto" />
+    <EditText
+        android:id="@+id/editPurchasePrice"
+        android:hint="Valor de Compra" />
+    <EditText
+        android:id="@+id/editStockQuantity"
+        android:hint="Quantidade em Estoque" />
+    <EditText
+        android:id="@+id/editColor"
+        android:hint="Cor" />
+    <EditText
+        android:id="@+id/editSize"
+        android:hint="Tamanho" />
+    <Button
+        android:id="@+id/buttonSave"
+        android:text="Salvar" />
+</LinearLayout>
+
+
+<LinearLayout ... >
+    <RecyclerView
+        android:id="@+id/recyclerView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+</LinearLayout>
+
+
+### FORM PRODUCT
+
+class ProductFormFragment : Fragment() {
+
+    private lateinit var viewModel: ProductViewModel
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        viewModel = ViewModelProvider(this).get(ProductViewModel::class.java)
+
+        val saveButton = view.findViewById<Button>(R.id.buttonSave)
+        saveButton.setOnClickListener {
+            val name = view.findViewById<EditText>(R.id.editProductName).text.toString()
+            val purchasePrice = view.findViewById<EditText>(R.id.editPurchasePrice).text.toString().toDoubleOrNull() ?: 0.0
+            val stockQuantity = view.findViewById<EditText>(R.id.editStockQuantity).text.toString().toIntOrNull() ?: 0
+            val color = view.findViewById<EditText>(R.id.editColor).text.toString()
+            val size = view.findViewById<EditText>(R.id.editSize).text.toString()
+
+            val prices = viewModel.calculateSalePrices(purchasePrice)
+            val product = Product(
+                productName = name,
+                purchasePrice = purchasePrice,
+                stockQuantity = stockQuantity,
+                color = color,
+                size = size,
+                onlineSalePrice = prices.first,
+                physicalSalePrice = prices.second
+            )
+
+            viewModel.insertProduct(product)
+        }
+    }
+}
+
+
+class ProductListFragment : Fragment() {
+
+    private lateinit var viewModel: ProductViewModel
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        viewModel = ViewModelProvider(this).get(ProductViewModel::class.java)
+
+        val adapter = ProductAdapter { product ->
+            showUpdateStockDialog(product)
+        }
+        recyclerView.adapter = adapter
+
+        viewModel.allProducts.observe(viewLifecycleOwner) { products ->
+            adapter.submitList(products)
+        }
+    }
+
+    private fun showUpdateStockDialog(product: Product) {
+        val dialog = AlertDialog.Builder(requireContext())
+            .setTitle("Atualizar Estoque")
+            .setView(EditText(requireContext()).apply {
+                inputType = InputType.TYPE_CLASS_NUMBER
+            })
+            .setPositiveButton("Atualizar") { _, _ ->
+                val newQuantity = (dialog as AlertDialog).findViewById<EditText>(android.R.id.edit).text.toString().toIntOrNull()
+                if (newQuantity != null) {
+                    viewModel.updateStockQuantity(product.id, newQuantity)
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .create()
+        dialog.show()
+    }
+}
+
+
+
+class ProductAdapter(private val onProductClick: (Product) -> Unit) :
+    ListAdapter<Product, ProductAdapter.ProductViewHolder>(ProductDiffCallback()) {
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ProductViewHolder {
+        val binding = ItemProductBinding.inflate(LayoutInflater.from(parent.context), parent, false)
+        return ProductViewHolder(binding)
+    }
+
+    override fun onBindViewHolder(holder: ProductViewHolder, position: Int) {
+        val product = getItem(position)
+        holder.bind(product)
+        holder.itemView.setOnClickListener { onProductClick(product) }
+    }
+
+    class ProductViewHolder(private val binding: ItemProductBinding) :
+        RecyclerView.ViewHolder(binding.root) {
+
+        fun bind(product: Product) {
+            binding.productName.text = product.productName
+            binding.stockQuantity.text = product.stockQuantity.toString()
+            binding.onlineSalePrice.text = "Online: R$${product.onlineSalePrice}"
+            binding.physicalSalePrice.text = "Física: R$${product.ph
+
+
+
+
